@@ -1,198 +1,361 @@
-import type { ActionFunction, LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useMatches } from "@remix-run/react";
-import { z } from "zod";
-import { BuildCard } from "~/components/BuildCard";
-import { Button, LinkButton } from "~/components/Button";
-import { BUILD } from "~/constants";
+import { useFetcher, useLoaderData, useMatches } from "@remix-run/react";
+import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { useUser } from "~/features/auth/core";
-import { getUserId, requireUserId } from "~/features/auth/core/user.server";
-import { atOrError } from "~/utils/arrays";
-import {
-  notFoundIfFalsy,
-  parseRequestFormData,
-  privatelyCachedJson,
-  validate,
-  type SendouRouteHandle,
-} from "~/utils/remix";
-import { userNewBuildPage } from "~/utils/urls";
-import { actualNumber, id } from "~/utils/zod";
-import { userParamsSchema, type UserPageLoaderData } from "./u.$identifier";
+import { BuildCard } from "~/components/BuildCard";
+import { Button } from "~/components/Button";
+import { Dialog } from "~/components/Dialog";
+import { FormMessage } from "~/components/FormMessage";
+import { Image, WeaponImage } from "~/components/Image";
+import { Menu, type MenuProps } from "~/components/Menu";
+import { SubmitButton } from "~/components/SubmitButton";
+import { LockIcon } from "~/components/icons/Lock";
+import { SortIcon } from "~/components/icons/Sort";
+import { TrashIcon } from "~/components/icons/Trash";
+import { UnlockIcon } from "~/components/icons/Unlock";
+import { BUILD_SORT_IDENTIFIERS, type BuildSort } from "~/db/tables";
+import { useUser } from "~/features/auth/core/user";
+import { useSearchParamState } from "~/hooks/useSearchParamState";
 import type { MainWeaponId } from "~/modules/in-game-lists";
 import { mainWeaponIds } from "~/modules/in-game-lists";
-import { WeaponImage } from "~/components/Image";
-import { useSearchParamState } from "~/hooks/useSearchParamState";
-import * as BuildRepository from "~/features/builds/BuildRepository.server";
-import * as UserRepository from "~/features/user-page/UserRepository.server";
+import { atOrError } from "~/utils/arrays";
+import type { SendouRouteHandle } from "~/utils/remix.server";
+import { weaponCategoryUrl } from "~/utils/urls";
+import { SendouButton } from "../../../components/elements/Button";
+import { DEFAULT_BUILD_SORT } from "../user-page-constants";
+import type { UserPageLoaderData } from "./u.$identifier";
 
-const buildsActionSchema = z.object({
-  buildToDeleteId: z.preprocess(actualNumber, id),
-});
-
-export const action: ActionFunction = async ({ request }) => {
-  const user = await requireUserId(request);
-  const data = await parseRequestFormData({
-    request,
-    schema: buildsActionSchema,
-  });
-
-  const usersBuilds = await BuildRepository.allByUserId({
-    userId: user.id,
-    showPrivate: true,
-  });
-
-  validate(usersBuilds.some((build) => build.id === data.buildToDeleteId));
-
-  await BuildRepository.deleteById(data.buildToDeleteId);
-
-  return null;
-};
+import { action } from "../actions/u.$identifier.builds.server";
+import { loader } from "../loaders/u.$identifier.builds.server";
+export { loader, action };
 
 export const handle: SendouRouteHandle = {
-  i18n: ["weapons", "builds", "gear"],
+	i18n: ["weapons", "builds", "gear"],
 };
 
-export const loader = async ({ params, request }: LoaderFunctionArgs) => {
-  const loggedInUser = await getUserId(request);
-  const { identifier } = userParamsSchema.parse(params);
-  const user = notFoundIfFalsy(
-    await UserRepository.identifierToUserId(identifier),
-  );
-
-  const builds = await BuildRepository.allByUserId({
-    userId: user.id,
-    showPrivate: loggedInUser?.id === user.id,
-  });
-
-  if (builds.length === 0 && loggedInUser?.id !== user.id) {
-    throw new Response(null, { status: 404 });
-  }
-
-  return privatelyCachedJson({
-    builds,
-    weaponCounts: calculateWeaponCounts(),
-  });
-
-  function calculateWeaponCounts() {
-    return builds.reduce(
-      (acc, build) => {
-        for (const weapon of build.weapons) {
-          acc[weapon.weaponSplId] = (acc[weapon.weaponSplId] ?? 0) + 1;
-        }
-
-        return acc;
-      },
-      {} as Record<MainWeaponId, number>,
-    );
-  }
-};
+type BuildFilter = "ALL" | "PUBLIC" | "PRIVATE" | MainWeaponId;
 
 export default function UserBuildsPage() {
-  const { t } = useTranslation("builds");
-  const user = useUser();
-  const parentPageData = atOrError(useMatches(), -2).data as UserPageLoaderData;
-  const data = useLoaderData<typeof loader>();
-  const [weaponFilter, setWeaponFilter] = useSearchParamState<
-    "ALL" | MainWeaponId
-  >({
-    defaultValue: "ALL",
-    name: "weapon",
-    revive: (value) =>
-      value === "ALL"
-        ? value
-        : mainWeaponIds.find((id) => id === Number(value)),
-  });
+	const { t } = useTranslation(["builds", "user"]);
+	const user = useUser();
+	const layoutData = atOrError(useMatches(), -2).data as UserPageLoaderData;
+	const data = useLoaderData<typeof loader>();
+	const [weaponFilter, setWeaponFilter] = useSearchParamState<BuildFilter>({
+		defaultValue: "ALL",
+		name: "weapon",
+		revive: (value) =>
+			["ALL", "PUBLIC", "PRIVATE"].includes(value)
+				? (value as BuildFilter)
+				: mainWeaponIds.find((id) => id === Number(value)),
+	});
 
-  const isOwnPage = user?.id === parentPageData.id;
+	const isOwnPage = user?.id === layoutData.user.id;
+	const [changingSorting, setChangingSorting] = useSearchParamState({
+		defaultValue: false,
+		name: "sorting",
+		revive: (value) => value === "true" && isOwnPage,
+	});
 
-  const builds =
-    weaponFilter === "ALL"
-      ? data.builds
-      : data.builds.filter((build) =>
-          build.weapons.map((wpn) => wpn.weaponSplId).includes(weaponFilter),
-        );
+	const closeSortingDialog = React.useCallback(
+		() => setChangingSorting(false),
+		[setChangingSorting],
+	);
 
-  return (
-    <div className="stack lg">
-      {isOwnPage && (
-        <div className="stack sm horizontal items-center justify-end">
-          {data.builds.length < BUILD.MAX_COUNT ? (
-            <LinkButton
-              to={userNewBuildPage(parentPageData)}
-              size="tiny"
-              testId="new-build-button"
-            >
-              {t("addBuild")}
-            </LinkButton>
-          ) : (
-            <>
-              <span className="info-message">{t("reachBuildMaxCount")}</span>
-              <button className="tiny" disabled>
-                {t("addBuild")}
-              </button>
-            </>
-          )}
-        </div>
-      )}
-      <WeaponFilters
-        weaponFilter={weaponFilter}
-        setWeaponFilter={setWeaponFilter}
-      />
-      {builds.length > 0 ? (
-        <div className="builds-container">
-          {builds.map((build) => (
-            <BuildCard key={build.id} build={build} canEdit={isOwnPage} />
-          ))}
-        </div>
-      ) : (
-        <div className="text-center text-lg text-lighter font-semi-bold">
-          {t("noBuilds")}
-        </div>
-      )}
-    </div>
-  );
+	const builds =
+		weaponFilter === "ALL"
+			? data.builds
+			: weaponFilter === "PUBLIC"
+				? data.builds.filter((build) => !build.private)
+				: weaponFilter === "PRIVATE"
+					? data.builds.filter((build) => build.private)
+					: data.builds.filter((build) =>
+							build.weapons
+								.map((wpn) => wpn.weaponSplId)
+								.includes(weaponFilter),
+						);
+
+	return (
+		<div className="stack lg">
+			{changingSorting ? (
+				<ChangeSortingDialog close={closeSortingDialog} />
+			) : null}
+			{isOwnPage && (
+				<div className="stack sm horizontal items-center justify-end">
+					<SendouButton
+						onPress={() => setChangingSorting(true)}
+						size="small"
+						variant="outlined"
+						icon={<SortIcon />}
+						data-testid="change-sorting-button"
+					>
+						{t("user:builds.sorting.changeButton")}
+					</SendouButton>
+				</div>
+			)}
+			<BuildsFilters
+				weaponFilter={weaponFilter}
+				setWeaponFilter={setWeaponFilter}
+			/>
+			{builds.length > 0 ? (
+				<div className="builds-container">
+					{builds.map((build) => (
+						<BuildCard
+							key={build.id}
+							build={build}
+							canEdit={isOwnPage}
+							withAbilitySorting={
+								!isOwnPage && !user?.preferences.disableBuildAbilitySorting
+							}
+						/>
+					))}
+				</div>
+			) : (
+				<div className="text-center text-lg text-lighter font-semi-bold">
+					{t("noBuilds")}
+				</div>
+			)}
+		</div>
+	);
 }
 
-function WeaponFilters({
-  weaponFilter,
-  setWeaponFilter,
+function BuildsFilters({
+	weaponFilter,
+	setWeaponFilter,
 }: {
-  weaponFilter: "ALL" | MainWeaponId;
-  setWeaponFilter: (weaponFilter: "ALL" | MainWeaponId) => void;
+	weaponFilter: BuildFilter;
+	setWeaponFilter: (weaponFilter: BuildFilter) => void;
 }) {
-  const { t } = useTranslation(["weapons", "builds"]);
-  const data = useLoaderData<typeof loader>();
+	const { t } = useTranslation(["weapons", "builds"]);
+	const data = useLoaderData<typeof loader>();
+	const user = useUser();
+	const layoutData = atOrError(useMatches(), -2).data as UserPageLoaderData;
 
-  if (data.builds.length === 0) return null;
+	if (data.builds.length === 0) return null;
 
-  return (
-    <div className="stack horizontal sm flex-wrap">
-      <Button
-        onClick={() => setWeaponFilter("ALL")}
-        variant={weaponFilter === "ALL" ? undefined : "outlined"}
-        size="tiny"
-        className="u__build-filter-button"
-      >
-        {t("builds:stats.all")} ({data.builds.length})
-      </Button>
-      {mainWeaponIds.map((weaponId) => {
-        const count = data.weaponCounts[weaponId];
+	const privateBuildsCount = data.builds.filter(
+		(build) => build.private,
+	).length;
+	const publicBuildsCount = data.builds.length - privateBuildsCount;
 
-        if (!count) return null;
+	const showPublicPrivateFilters =
+		user?.id === layoutData.user.id && privateBuildsCount > 0;
 
-        return (
-          <Button
-            key={weaponId}
-            onClick={() => setWeaponFilter(weaponId)}
-            variant={weaponFilter === weaponId ? undefined : "outlined"}
-            size="tiny"
-            className="u__build-filter-button"
-          >
-            <WeaponImage weaponSplId={weaponId} variant="build" width={20} />
-            {t(`weapons:MAIN_${weaponId}`)} ({count})
-          </Button>
-        );
-      })}
-    </div>
-  );
+	const WeaponFilterMenuButton = React.forwardRef((props, ref) => (
+		<Button
+			variant={typeof weaponFilter === "number" ? undefined : "outlined"}
+			size="tiny"
+			className="u__build-filter-button"
+			{...props}
+			_ref={ref}
+		>
+			<Image
+				path={weaponCategoryUrl("SHOOTERS")}
+				width={24}
+				height={24}
+				alt=""
+			/>
+			{t("builds:filters.filterByWeapon")}
+		</Button>
+	));
+
+	const weaponFilterMenuItems = mainWeaponIds
+		.map((weaponId) => {
+			const count = data.weaponCounts[weaponId];
+
+			if (!count) return null;
+
+			const item: MenuProps["items"][number] = {
+				id: weaponId,
+				text: `${t(`weapons:MAIN_${weaponId}`)} (${count})`,
+				icon: <WeaponImage weaponSplId={weaponId} variant="build" size={18} />,
+				onClick: () => setWeaponFilter(weaponId),
+				selected: weaponFilter === weaponId,
+			};
+
+			return item;
+		})
+		.filter((item) => item !== null);
+
+	return (
+		<div className="stack horizontal sm flex-wrap">
+			<SendouButton
+				onPress={() => setWeaponFilter("ALL")}
+				variant={weaponFilter === "ALL" ? undefined : "outlined"}
+				size="small"
+				className="u__build-filter-button"
+			>
+				{t("builds:stats.all")} ({data.builds.length})
+			</SendouButton>
+			{showPublicPrivateFilters ? (
+				<>
+					<Button
+						onClick={() => setWeaponFilter("PUBLIC")}
+						variant={weaponFilter === "PUBLIC" ? undefined : "outlined"}
+						size="tiny"
+						className="u__build-filter-button"
+						icon={<UnlockIcon />}
+					>
+						{t("builds:stats.public")} ({publicBuildsCount})
+					</Button>
+					<Button
+						onClick={() => setWeaponFilter("PRIVATE")}
+						variant={weaponFilter === "PRIVATE" ? undefined : "outlined"}
+						size="tiny"
+						className="u__build-filter-button"
+						icon={<LockIcon />}
+					>
+						{t("builds:stats.private")} ({privateBuildsCount})
+					</Button>
+				</>
+			) : null}
+
+			<Menu
+				items={weaponFilterMenuItems}
+				button={WeaponFilterMenuButton}
+				scrolling
+			/>
+		</div>
+	);
+}
+
+const MISSING_SORT_VALUE = "null";
+function ChangeSortingDialog({ close }: { close: () => void }) {
+	const data = useLoaderData<typeof loader>();
+	const [buildSorting, setBuildSorting] = React.useState<
+		ReadonlyArray<BuildSort | null>
+	>(() => {
+		if (!data.buildSorting) return [...DEFAULT_BUILD_SORT, null];
+		if (data.buildSorting.length === BUILD_SORT_IDENTIFIERS.length)
+			return data.buildSorting;
+
+		return [...data.buildSorting, null];
+	});
+	const { t } = useTranslation(["common", "user"]);
+	const fetcher = useFetcher();
+
+	React.useEffect(() => {
+		if (fetcher.state !== "loading") return;
+
+		close();
+	}, [fetcher.state, close]);
+
+	const canAddMoreSorting = buildSorting.length < BUILD_SORT_IDENTIFIERS.length;
+
+	const changeSorting = (idx: number, newIdentifier: BuildSort | null) => {
+		const newSorting = buildSorting.map((oldIdentifier, i) =>
+			i === idx ? newIdentifier : oldIdentifier,
+		);
+
+		if (canAddMoreSorting && newSorting[newSorting.length - 1] !== null) {
+			newSorting.push(null);
+		}
+
+		setBuildSorting(newSorting);
+	};
+
+	const deleteLastSorting = () => {
+		setBuildSorting((prev) => [...prev.filter(Boolean).slice(0, -1), null]);
+	};
+
+	return (
+		<Dialog isOpen close={close}>
+			<fetcher.Form method="post">
+				<input
+					type="hidden"
+					name="buildSorting"
+					value={JSON.stringify(buildSorting.filter(Boolean))}
+				/>
+				<h2 className="text-lg">{t("user:builds.sorting.header")}</h2>
+				<div className="stack lg">
+					<div className="stack md">
+						<FormMessage type="info">
+							{t("user:builds.sorting.info")}
+						</FormMessage>
+						<Button
+							className="ml-auto"
+							variant="minimal"
+							size="tiny"
+							onClick={() => setBuildSorting([...DEFAULT_BUILD_SORT, null])}
+						>
+							{t("user:builds.sorting.backToDefaults")}
+						</Button>
+						{buildSorting.map((sort, i) => {
+							const isLast = i === buildSorting.length - 1;
+							const isSecondToLast = i === buildSorting.length - 2;
+
+							if (isLast && canAddMoreSorting) {
+								return (
+									<ChangeSortingDialogSelect
+										key={i}
+										identifiers={BUILD_SORT_IDENTIFIERS.filter(
+											(identifier) =>
+												!buildSorting.slice(0, -1).includes(identifier),
+										)}
+										value={sort}
+										changeValue={(newValue) => changeSorting(i, newValue)}
+									/>
+								);
+							}
+
+							return (
+								<div key={i} className="stack horizontal justify-between">
+									<div className="font-bold">
+										{i + 1}) {t(`user:builds.sorting.${sort!}`)}
+									</div>
+									{(isLast && !canAddMoreSorting) ||
+									(canAddMoreSorting && isSecondToLast) ? (
+										<Button
+											icon={<TrashIcon />}
+											variant="minimal-destructive"
+											onClick={deleteLastSorting}
+										/>
+									) : null}
+								</div>
+							);
+						})}
+					</div>
+
+					<div className="stack sm horizontal justify-center">
+						<SubmitButton _action="UPDATE_SORTING">
+							{t("common:actions.save")}
+						</SubmitButton>
+						<Button variant="destructive" onClick={close}>
+							{t("common:actions.cancel")}
+						</Button>
+					</div>
+				</div>
+			</fetcher.Form>
+		</Dialog>
+	);
+}
+
+function ChangeSortingDialogSelect({
+	identifiers,
+	value,
+	changeValue,
+}: {
+	identifiers: BuildSort[];
+	value: BuildSort | null;
+	changeValue: (value: BuildSort | null) => void;
+}) {
+	const { t } = useTranslation(["user"]);
+
+	return (
+		<select
+			value={value ?? MISSING_SORT_VALUE}
+			onChange={(e) => {
+				if (e.target.value === MISSING_SORT_VALUE) changeValue(null);
+
+				changeValue(e.target.value as BuildSort);
+			}}
+		>
+			<option value={MISSING_SORT_VALUE}>-</option>
+			{identifiers.map((identifier) => {
+				return (
+					<option key={identifier} value={identifier}>
+						{t(`user:builds.sorting.${identifier}`)}
+					</option>
+				);
+			})}
+		</select>
+	);
 }

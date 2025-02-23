@@ -3,6 +3,7 @@ import type { User } from "~/db/types";
 import { seasonObject } from "~/features/mmr/season";
 import type { MainWeaponId } from "~/modules/in-game-lists";
 import { dateToDatabaseTimestamp } from "~/utils/dates";
+import { MATCHES_COUNT_NEEDED_FOR_LEADERBOARD } from "../leaderboards-constants";
 
 const stm = sql.prepare(/* sql */ `
   with "q1" as (
@@ -19,7 +20,8 @@ const stm = sql.prepare(/* sql */ `
   )
   select
     "q1"."userId",
-    "q1"."weaponSplId"
+    "q1"."weaponSplId",
+    "q1"."count"
   from "q1"
   group by "q1"."userId"
 `);
@@ -27,18 +29,23 @@ const stm = sql.prepare(/* sql */ `
 export type SeasonPopularUsersWeapon = Record<User["id"], MainWeaponId>;
 
 export function seasonPopularUsersWeapon(
-  season: number,
+	season: number,
 ): SeasonPopularUsersWeapon {
-  const { starts, ends } = seasonObject(season);
+	const { starts, ends } = seasonObject(season);
 
-  const rows = stm.all({
-    season,
-    starts: dateToDatabaseTimestamp(starts),
-    ends: dateToDatabaseTimestamp(ends),
-  }) as Array<{
-    userId: User["id"];
-    weaponSplId: MainWeaponId;
-  }>;
+	const rows = stm.all({
+		season,
+		starts: dateToDatabaseTimestamp(starts),
+		ends: dateToDatabaseTimestamp(ends),
+	}) as Array<{
+		count: number;
+		userId: User["id"];
+		weaponSplId: MainWeaponId;
+	}>;
 
-  return Object.fromEntries(rows.map((r) => [r.userId, r.weaponSplId]));
+	return Object.fromEntries(
+		rows
+			.filter((r) => r.count > MATCHES_COUNT_NEEDED_FOR_LEADERBOARD)
+			.map((r) => [r.userId, r.weaponSplId]),
+	);
 }

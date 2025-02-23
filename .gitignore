@@ -23,4 +23,6 @@ dump
 /playwright-report/
 /playwright/.cache/
 
-newrelic_agent.log
+.vscode
+
+notepad.txt
