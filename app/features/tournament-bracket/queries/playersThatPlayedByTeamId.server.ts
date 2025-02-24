@@ -4,7 +4,7 @@ import type { User } from "~/db/types";
 const stm = sql.prepare(/* sql */ `
   select
     "User"."id",
-    "User"."discordName",
+    "User"."username",
     "User"."discordAvatar",
     "User"."discordId",
     "User"."customUrl",
@@ -26,10 +26,10 @@ const stm = sql.prepare(/* sql */ `
 `);
 
 export type PlayerThatPlayedByTeamId = Pick<
-  User,
-  "id" | "discordName" | "discordAvatar" | "discordId" | "customUrl" | "country"
+	User,
+	"id" | "username" | "discordAvatar" | "discordId" | "customUrl" | "country"
 > & { tournamentTeamId: number };
 
 export function playersThatPlayedByTournamentId(tournamentId: number) {
-  return stm.all({ tournamentId }) as PlayerThatPlayedByTeamId[];
+	return stm.all({ tournamentId }) as PlayerThatPlayedByTeamId[];
 }
