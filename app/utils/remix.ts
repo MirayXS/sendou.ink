@@ -1,233 +1,122 @@
-import { z } from "zod";
-import type { Params, UIMatch } from "@remix-run/react";
-import type navItems from "~/components/layout/nav-items.json";
-import { json } from "@remix-run/node";
-import type { Namespace, TFunction } from "i18next";
-import { noticeError } from "./newrelic.server";
+import type {
+	Location,
+	ShouldRevalidateFunctionArgs,
+	useLoaderData,
+} from "@remix-run/react";
+import { truncateBySentence } from "./strings";
+import { COMMON_PREVIEW_IMAGE } from "./urls";
 
-export function notFoundIfFalsy<T>(value: T | null | undefined): T {
-  if (!value) throw new Response(null, { status: 404 });
-
-  return value;
+export function isRevalidation(args: ShouldRevalidateFunctionArgs) {
+	return (
+		args.defaultShouldRevalidate && args.nextUrl.href === args.currentUrl.href
+	);
 }
 
-export function notFoundIfNullLike<T>(value: T | null | undefined): T {
-  if (value === null || value === undefined)
-    throw new Response(null, { status: 404 });
+// https://remix.run/docs/en/main/start/future-flags#serializefrom
+export type SerializeFrom<T> = ReturnType<typeof useLoaderData<T>>;
 
-  return value;
+interface OpenGraphArgs {
+	/** Title as shown by the browser in the tab etc. Appended with "| sendou.ink"*/
+	title: string;
+	/** Title as shown when shared on Bluesky, Discord etc. Also used in search results. If omitted, "title" is used instead. */
+	ogTitle?: string;
+	/** Brief description of the page's contents used by search engines and social media sharing. If the description is over 300 characters long it is automatically truncated. */
+	description?: string;
+	location: Location;
+	/** Optionally override location pathname. */
+	url?: string;
+	image?: {
+		url: string;
+		dimensions?: {
+			width: number;
+			height: number;
+		};
+	};
 }
 
-export function badRequestIfFalsy<T>(value: T | null | undefined): T {
-  if (!value) {
-    noticeError(new Error("Value is falsy"));
-    throw new Response(null, { status: 400 });
-  }
+const ROOT_URL = "https://sendou.ink";
 
-  return value;
+export function metaTitle(args: Pick<OpenGraphArgs, "title" | "ogTitle">) {
+	return [
+		{
+			title:
+				args.title === "sendou.ink" ? args.title : `${args.title} | sendou.ink`,
+		},
+		{
+			property: "og:title",
+			content: args.ogTitle ?? args.title,
+		},
+	];
 }
 
-export function parseSearchParams<T extends z.ZodTypeAny>({
-  request,
-  schema,
-}: {
-  request: Request;
-  schema: T;
-}): z.infer<T> {
-  const url = new URL(request.url);
-  const searchParams = Object.fromEntries(url.searchParams);
+export function metaTags(args: OpenGraphArgs) {
+	const truncatedDescription = args.description
+		? truncateBySentence(args.description, 300)
+		: null;
 
-  try {
-    return schema.parse(searchParams);
-  } catch (e) {
-    if (e instanceof z.ZodError) {
-      noticeError(e, { searchParams: JSON.stringify(searchParams) });
-      console.error(e);
-      throw new Response(JSON.stringify(e), { status: 400 });
-    }
+	const result = [
+		...metaTitle(args),
+		args.description
+			? {
+					name: "description",
+					content: truncatedDescription,
+				}
+			: null,
+		args.description
+			? {
+					property: "og:description",
+					content: truncatedDescription,
+				}
+			: null,
+		{
+			property: "og:site_name",
+			content: "sendou.ink",
+		},
+		{
+			property: "og:type",
+			content: "website",
+		},
+		{
+			property: "og:url",
+			content: `${ROOT_URL}${args.location.pathname}`,
+		},
+		{
+			property: "og:image",
+			content: (() => {
+				if (args.image?.url.startsWith("http")) {
+					return args.image.url;
+				}
 
-    throw e;
-  }
-}
+				if (args.image) {
+					return `${ROOT_URL}${args.image.url}`;
+				}
 
-export function parseSafeSearchParams<T extends z.ZodTypeAny>({
-  request,
-  schema,
-}: {
-  request: Request;
-  schema: T;
-}): z.SafeParseReturnType<any, z.infer<T>> {
-  const url = new URL(request.url);
-  return schema.safeParse(Object.fromEntries(url.searchParams));
-}
+				return `${ROOT_URL}${COMMON_PREVIEW_IMAGE}`;
+			})(),
+		},
+	].filter((val) => val !== null);
 
-/** Parse formData of a request with the given schema. Throws HTTP 400 response if fails. */
-export async function parseRequestFormData<T extends z.ZodTypeAny>({
-  request,
-  schema,
-  parseAsync,
-}: {
-  request: Request;
-  schema: T;
-  parseAsync?: boolean;
-}): Promise<z.infer<T>> {
-  const formDataObj = formDataToObject(await request.formData());
-  try {
-    const parsed = parseAsync
-      ? await schema.parseAsync(formDataObj)
-      : schema.parse(formDataObj);
+	if (!args.image) {
+		result.push({
+			property: "og:image:width",
+			content: "1920",
+		});
 
-    return parsed;
-  } catch (e) {
-    if (e instanceof z.ZodError) {
-      noticeError(e, { formData: JSON.stringify(formDataObj) });
-      console.error(e);
-      throw new Response(JSON.stringify(e), { status: 400 });
-    }
+		result.push({
+			property: "og:image:height",
+			content: "1080",
+		});
+	} else if (args.image.dimensions) {
+		result.push({
+			property: "og:image:width",
+			content: String(args.image.dimensions.width),
+		});
 
-    throw e;
-  }
-}
+		result.push({
+			property: "og:image:height",
+			content: String(args.image.dimensions.height),
+		});
+	}
 
-/** Parse formData with the given schema. Throws HTTP 400 response if fails. */
-export function parseFormData<T extends z.ZodTypeAny>({
-  formData,
-  schema,
-}: {
-  formData: FormData;
-  schema: T;
-}): z.infer<T> {
-  const formDataObj = formDataToObject(formData);
-  try {
-    return schema.parse(formDataObj);
-  } catch (e) {
-    if (e instanceof z.ZodError) {
-      noticeError(e, { formData: JSON.stringify(formDataObj) });
-      console.error(e);
-      throw new Response(JSON.stringify(e), { status: 400 });
-    }
-
-    throw e;
-  }
-}
-
-/** Parse params with the given schema. Throws HTTP 400 response if fails. */
-export function parseParams<T extends z.ZodTypeAny>({
-  params,
-  schema,
-}: {
-  params: Params<string>;
-  schema: T;
-}): z.infer<T> {
-  try {
-    return schema.parse(params);
-  } catch (e) {
-    if (e instanceof z.ZodError) {
-      noticeError(e, { params: JSON.stringify(params) });
-      console.error(e);
-      throw new Response(JSON.stringify(e), { status: 400 });
-    }
-
-    throw e;
-  }
-}
-
-export async function safeParseRequestFormData<T extends z.ZodTypeAny>({
-  request,
-  schema,
-}: {
-  request: Request;
-  schema: T;
-}): Promise<
-  { success: true; data: z.infer<T> } | { success: false; errors: string[] }
-> {
-  const parsed = schema.safeParse(formDataToObject(await request.formData()));
-
-  // this implementation is somewhat redundant but it's the only way I got types to work nice
-  if (!parsed.success) {
-    return {
-      success: false,
-      errors: parsed.error.errors.map((error) => error.message),
-    };
-  }
-
-  return {
-    success: true,
-    data: parsed.data,
-  };
-}
-
-function formDataToObject(formData: FormData) {
-  const result: Record<string, string | string[]> = {};
-
-  for (const [key, value] of formData.entries()) {
-    const newValue = String(value);
-    const existingValue = result[key];
-
-    if (Array.isArray(existingValue)) {
-      existingValue.push(newValue);
-    } else if (typeof existingValue === "string") {
-      result[key] = [existingValue, newValue];
-    } else {
-      result[key] = newValue;
-    }
-  }
-
-  return result;
-}
-
-/** Asserts condition is truthy. Throws a new `Response` with given status code if falsy.  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- same format as TS docs: https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#assertion-functions
-export function validate(
-  condition: any,
-  message?: string,
-  status = 400,
-): asserts condition {
-  if (condition) return;
-
-  noticeError(new Error(`Validation error: ${message}`));
-  throw new Response(
-    message ? JSON.stringify({ validationError: message }) : undefined,
-    {
-      status,
-    },
-  );
-}
-
-export type Breadcrumb =
-  | { imgPath: string; type: "IMAGE"; href: string }
-  | { text: string; type: "TEXT"; href: string };
-
-/**
- * Our custom type for route handles - the keys are defined by us or
- * libraries that parse them.
- *
- * Can be set per route using `export const handle: SendouRouteHandle = { };`
- * Can be accessed for all currently active routes via the `useMatches()` hook.
- */
-export type SendouRouteHandle = {
-  /** The i18n translation files used for this route, via remix-i18next */
-  i18n?: Namespace;
-
-  /**
-   * A function that returns the breadcrumb text that should be displayed in
-   * the <Breadcrumb> component
-   */
-  breadcrumb?: (args: {
-    match: UIMatch;
-    t: TFunction<"common", undefined>;
-  }) => Breadcrumb | Array<Breadcrumb> | undefined;
-
-  /** The name of a navItem that is active on this route. See nav-items.json */
-  navItemName?: (typeof navItems)[number]["name"];
-};
-
-/** Caches the loader response with "private" Cache-Control meaning that CDN won't cache the response.
- * To be used when the response is different for each user. This is especially useful when the response
- * is prefetched on link hover.
- */
-export function privatelyCachedJson<T>(data: T) {
-  return json(data, {
-    headers: { "Cache-Control": "private, max-age=5" },
-  });
+	return result;
 }

@@ -1,180 +1,168 @@
-import { DISCORD_AUTH_KEY } from "./authenticator.server";
-import type { User } from "~/db/types";
-import type { OAuth2Profile } from "remix-auth-oauth2";
 import { OAuth2Strategy } from "remix-auth-oauth2";
-import invariant from "tiny-invariant";
 import { z } from "zod";
+import type { User } from "~/db/types";
 import * as UserRepository from "~/features/user-page/UserRepository.server";
-
-interface DiscordExtraParams extends Record<string, string | number> {
-  scope: string;
-}
+import invariant from "~/utils/invariant";
+import { logger } from "~/utils/logger";
 
 export type LoggedInUser = User["id"];
 
 const partialDiscordUserSchema = z.object({
-  avatar: z.string().nullish(),
-  discriminator: z.string(),
-  id: z.string(),
-  username: z.string(),
-  global_name: z.string().nullish(),
+	avatar: z.string().nullish(),
+	discriminator: z.string(),
+	id: z.string(),
+	username: z.string(),
+	global_name: z.string().nullish(),
+	verified: z.boolean().nullish(),
 });
 const partialDiscordConnectionsSchema = z.array(
-  z.object({
-    visibility: z.number(),
-    verified: z.boolean(),
-    name: z.string(),
-    id: z.string(),
-    type: z.string(),
-  }),
+	z.object({
+		visibility: z.number(),
+		verified: z.boolean(),
+		name: z.string(),
+		id: z.string(),
+		type: z.string(),
+	}),
 );
 const discordUserDetailsSchema = z.tuple([
-  partialDiscordUserSchema,
-  partialDiscordConnectionsSchema,
+	partialDiscordUserSchema,
+	partialDiscordConnectionsSchema,
 ]);
 
-export class DiscordStrategy extends OAuth2Strategy<
-  LoggedInUser,
-  OAuth2Profile,
-  DiscordExtraParams
-> {
-  name = DISCORD_AUTH_KEY;
-  scope: string;
+export const DiscordStrategy = () => {
+	const envVars = authEnvVars();
 
-  constructor() {
-    const envVars = authEnvVars();
+	const authGatewayEnabled = () => {
+		return Boolean(process.env.AUTH_GATEWAY_TOKEN_URL);
+	};
 
-    super(
-      {
-        authorizationURL: "https://discord.com/api/oauth2/authorize",
-        tokenURL:
-          process.env["AUTH_GATEWAY_TOKEN_URL"] ??
-          "https://discord.com/api/oauth2/token",
-        clientID: envVars.DISCORD_CLIENT_ID,
-        clientSecret: envVars.DISCORD_CLIENT_SECRET,
-        callbackURL: new URL("/auth/callback", envVars.BASE_URL).toString(),
-      },
-      async ({ accessToken }) => {
-        try {
-          const discordResponses = this.authGatewayEnabled()
-            ? await this.fetchProfileViaGateway(accessToken)
-            : await this.fetchProfileViaDiscordApi(accessToken);
+	const jsonIfOk = (res: Response) => {
+		if (!res.ok) {
+			throw new Error(
+				`Auth related call failed with status code ${res.status}`,
+			);
+		}
 
-          const [user, connections] =
-            discordUserDetailsSchema.parse(discordResponses);
+		return res.json();
+	};
 
-          const userFromDb = await UserRepository.upsert({
-            discordAvatar: user.avatar ?? null,
-            discordDiscriminator: user.discriminator,
-            discordId: user.id,
-            discordName: user.global_name ?? user.username,
-            discordUniqueName: user.global_name ? user.username : null,
-            ...this.parseConnections(connections),
-          });
+	const fetchProfileViaDiscordApi = (token: string) => {
+		const authHeader: [string, string] = ["Authorization", `Bearer ${token}`];
 
-          return userFromDb.id;
-        } catch (e) {
-          console.error("Failed to finish authentication:\n", e);
-          throw new Error("Failed to finish authentication");
-        }
-      },
-    );
+		return Promise.all([
+			fetch("https://discord.com/api/users/@me", {
+				headers: [authHeader],
+			}).then(jsonIfOk),
+			fetch("https://discord.com/api/users/@me/connections", {
+				headers: [authHeader],
+			}).then(jsonIfOk),
+		]);
+	};
 
-    this.scope = "identify connections";
-  }
+	const fetchProfileViaGateway = (token: string) => {
+		const url = `${process.env.AUTH_GATEWAY_PROFILE_URL}?token=${token}`;
 
-  private authGatewayEnabled() {
-    return Boolean(process.env["AUTH_GATEWAY_TOKEN_URL"]);
-  }
+		return fetch(url).then(jsonIfOk);
+	};
 
-  private async fetchProfileViaDiscordApi(token: string) {
-    const authHeader: [string, string] = ["Authorization", `Bearer ${token}`];
+	return new OAuth2Strategy(
+		{
+			clientId: envVars.DISCORD_CLIENT_ID,
+			clientSecret: envVars.DISCORD_CLIENT_SECRET,
 
-    return Promise.all([
-      fetch("https://discord.com/api/users/@me", {
-        headers: [authHeader],
-      }).then(this.jsonIfOk),
-      fetch("https://discord.com/api/users/@me/connections", {
-        headers: [authHeader],
-      }).then(this.jsonIfOk),
-    ]);
-  }
+			authorizationEndpoint: "https://discord.com/api/oauth2/authorize",
+			tokenEndpoint:
+				process.env.AUTH_GATEWAY_TOKEN_URL ||
+				"https://discord.com/api/oauth2/token",
+			redirectURI: new URL("/auth/callback", envVars.BASE_URL).toString(),
 
-  private async fetchProfileViaGateway(token: string) {
-    const url = `${process.env["AUTH_GATEWAY_PROFILE_URL"]}?token=${token}`;
+			scopes: ["identify", "connections", "email"],
+		},
+		async ({ tokens }) => {
+			try {
+				const discordResponses = authGatewayEnabled()
+					? await fetchProfileViaGateway(tokens.accessToken())
+					: await fetchProfileViaDiscordApi(tokens.accessToken());
 
-    return fetch(url).then(this.jsonIfOk);
-  }
+				const [user, connections] =
+					discordUserDetailsSchema.parse(discordResponses);
 
-  private jsonIfOk(res: Response) {
-    if (!res.ok) {
-      throw new Error(
-        `Auth related call failed with status code ${res.status}`,
-      );
-    }
+				const isAlreadyRegistered = Boolean(
+					await UserRepository.identifierToUserId(user.id),
+				);
 
-    return res.json();
-  }
+				if (!isAlreadyRegistered && !user.verified) {
+					logger.info(`User is not verified with id: ${user.id}`);
+					throw new Error("Unverified user");
+				}
 
-  private parseConnections(
-    connections: z.infer<typeof partialDiscordConnectionsSchema>,
-  ) {
-    if (!connections) throw new Error("No connections");
+				const userFromDb = await UserRepository.upsert({
+					discordAvatar: user.avatar ?? null,
+					discordId: user.id,
+					discordName: user.global_name ?? user.username,
+					discordUniqueName: user.global_name ? user.username : null,
+					...parseConnections(connections),
+				});
 
-    const result: {
-      twitch: string | null;
-      twitter: string | null;
-      youtubeId: string | null;
-    } = {
-      twitch: null,
-      twitter: null,
-      youtubeId: null,
-    };
+				return userFromDb.id;
+			} catch (e) {
+				console.error("Failed to finish authentication:\n", e);
+				throw new Error("Failed to finish authentication");
+			}
+		},
+	);
+};
 
-    for (const connection of connections) {
-      if (connection.visibility !== 1 || !connection.verified) continue;
+function parseConnections(
+	connections: z.infer<typeof partialDiscordConnectionsSchema>,
+) {
+	if (!connections) throw new Error("No connections");
 
-      switch (connection.type) {
-        case "twitch":
-          result.twitch = connection.name;
-          break;
-        case "twitter":
-          result.twitter = connection.name;
-          break;
-        case "youtube":
-          result.youtubeId = connection.id;
-      }
-    }
+	const result: {
+		twitch: string | null;
+		youtubeId: string | null;
+		bsky: string | null;
+	} = {
+		twitch: null,
+		youtubeId: null,
+		bsky: null,
+	};
 
-    return result;
-  }
+	for (const connection of connections) {
+		if (connection.visibility !== 1 || !connection.verified) continue;
 
-  protected authorizationParams() {
-    const urlSearchParams: Record<string, string> = {
-      scope: this.scope,
-    };
+		switch (connection.type) {
+			case "twitch":
+				result.twitch = connection.name;
+				break;
+			case "youtube":
+				result.youtubeId = connection.id;
+				break;
+			case "bluesky":
+				result.bsky = connection.name;
+		}
+	}
 
-    return new URLSearchParams(urlSearchParams);
-  }
+	return result;
 }
 
 function authEnvVars() {
-  if (process.env.NODE_ENV === "production") {
-    invariant(process.env["DISCORD_CLIENT_ID"]);
-    invariant(process.env["DISCORD_CLIENT_SECRET"]);
-    invariant(process.env["BASE_URL"]);
+	if (process.env.NODE_ENV === "production") {
+		invariant(process.env.DISCORD_CLIENT_ID);
+		invariant(process.env.DISCORD_CLIENT_SECRET);
+		invariant(import.meta.env.VITE_SITE_DOMAIN);
 
-    return {
-      DISCORD_CLIENT_ID: process.env["DISCORD_CLIENT_ID"],
-      DISCORD_CLIENT_SECRET: process.env["DISCORD_CLIENT_SECRET"],
-      BASE_URL: process.env["BASE_URL"],
-    };
-  }
+		return {
+			DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+			DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+			BASE_URL: import.meta.env.VITE_SITE_DOMAIN,
+		};
+	}
 
-  // allow running the project in development without setting auth env vars
-  return {
-    DISCORD_CLIENT_ID: process.env["DISCORD_CLIENT_ID"] ?? "",
-    DISCORD_CLIENT_SECRET: process.env["DISCORD_CLIENT_SECRET"] ?? "",
-    BASE_URL: process.env["BASE_URL"] ?? "",
-  };
+	// allow running the project in development without setting auth env vars
+	return {
+		DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID ?? "",
+		DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET ?? "",
+		BASE_URL: import.meta.env.VITE_SITE_DOMAIN ?? "",
+	};
 }

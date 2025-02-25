@@ -1,5 +1,5 @@
-module.exports.up = function (db) {
-  db.prepare(
-    /* sql */ `alter table "User" add "plusSkippedForSeasonNth" integer`,
-  ).run();
-};
+export function up(db) {
+	db.prepare(
+		/* sql */ `alter table "User" add "plusSkippedForSeasonNth" integer`,
+	).run();
+}

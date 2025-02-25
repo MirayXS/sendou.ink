@@ -12,16 +12,18 @@ const stm = sql.prepare(/* sql */ `
     "UnvalidatedUserSubmittedImage"."id" = "Team"."bannerImgId"
   left join "Art" on
     "UnvalidatedUserSubmittedImage"."id" = "Art"."imgId"
+  left join "CalendarEvent" on
+    "UnvalidatedUserSubmittedImage"."id" = "CalendarEvent"."avatarImgId"
   where "UnvalidatedUserSubmittedImage"."validatedAt" is null
-    and ("Team"."id" is not null or "Art"."id" is not null)
+    and ("Team"."id" is not null or "Art"."id" is not null or "CalendarEvent"."id" is not null)
   limit 1
 `);
 
 type UnvalidatedImage = Pick<
-  UserSubmittedImage,
-  "id" | "url" | "submitterUserId"
+	UserSubmittedImage,
+	"id" | "url" | "submitterUserId"
 >;
 
 export function oneUnvalidatedImage() {
-  return stm.get() as UnvalidatedImage | null;
+	return stm.get() as UnvalidatedImage | null;
 }
